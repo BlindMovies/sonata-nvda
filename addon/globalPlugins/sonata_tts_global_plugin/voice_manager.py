@@ -354,7 +354,8 @@ class OnlineSonataVoicesPanel(SizedPanel):
             executor=aio.THREADED_EXECUTOR,
             func=functools.partial(play_remote_mp3, mp3url),
             done_callback=lambda future: True,
-            parent=self.GetTopLevelParent()
+            parent=self.GetTopLevelParent(),
+            dismiss_callback=lambda: (winsound.PlaySound(None, winsound.SND_PURGE), True)[1]
         )
 
     def on_download(self, event):

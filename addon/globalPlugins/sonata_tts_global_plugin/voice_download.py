@@ -44,7 +44,7 @@ RT_VOICE_DOWNLOAD_URL_PREFIX = "https://huggingface.co/datasets/mush42/piper-rt/
 
 VOICE_INFO_REGEX = re.compile(
     r"(?P<language>[a-z]+(_|-)?([a-z]+)?)(-|_)"
-    r"(?P<name>[a-z|_]+(\+RT)?)(-|_)"
+    r"(?P<name>[\w]+(\+RT)?)(-|_)"
     r"(?P<quality>(high|medium|low|x-low|x_low))",
     re.I
 )
@@ -509,11 +509,11 @@ def install_voice_from_tar_archive(tar_path, voices_dir):
     if "MODEL_CARD" in filenames:
         files_to_extract.append("MODEL_CARD")
     for file in files_to_extract:
-        tar.extract(
-            filenames[file],
-            path=voice_folder_name,
-            set_attrs=False,
-        )
+        member = filenames[file]
+        filename_only = os.path.basename(member.name)
+        target_path = os.path.join(voice_folder_name, filename_only)
+        with tar.extractfile(member) as source, open(target_path, "wb") as dest:
+            shutil.copyfileobj(source, dest)
     return voice_key
 
 
