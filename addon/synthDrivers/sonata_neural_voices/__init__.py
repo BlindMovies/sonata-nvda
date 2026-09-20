@@ -7,10 +7,12 @@ from asyncio.exceptions import CancelledError
 from collections import OrderedDict
 from contextlib import suppress
 
+import api
 import config
 import languageHandler
 import synthDriverHandler
-from autoSettingsUtils.driverSetting import DriverSetting, NumericDriverSetting
+import tones
+from autoSettingsUtils.driverSetting import BooleanDriverSetting, DriverSetting, NumericDriverSetting
 from nvwave import WavePlayer
 from logHandler import log
 from speech import sayAll
@@ -44,7 +46,10 @@ from .tts_system import (
     SonataTextToSpeechSystem,
     SpeakerNotFoundError,
     SpeechOptions,
-)    
+)
+from .audio_processing import normalize_audio, mono_to_stereo_panned, apply_night_mode
+from .phrase_cache import phrase_cache
+from .structural_reading import split_into_segments
 
 import addonHandler
 
@@ -53,6 +58,31 @@ addonHandler.initTranslation()
 
 aio.initialize()
 _GRPC_IS_INIT = grpc_client.initialize()
+
+
+def _get_focus_pan() -> float:
+    """
+    Compute a stereo pan value [-1.0, +1.0] based on the horizontal position
+    of the currently focused NVDA object on the screen.
+    Returns 0.0 (centre) when position is unavailable.
+    """
+    try:
+        import wx
+        obj = api.getFocusObject()
+        if obj is None:
+            return 0.0
+        loc = obj.location
+        if loc is None:
+            return 0.0
+        screen_width = wx.SystemSettings.GetMetric(wx.SYS_SCREEN_X)
+        if screen_width <= 0:
+            return 0.0
+        # Centre of the object relative to screen width → [-1, +1]
+        centre_x = loc.left + loc.width / 2.0
+        pan = (centre_x / screen_width) * 2.0 - 1.0
+        return max(-1.0, min(1.0, pan))
+    except Exception:
+        return 0.0
 
 
 class DoneSpeakingTask:
@@ -83,21 +113,63 @@ class SpeechTask:
     __slots__ = [
         "task",
         "player",
+        "normalize",
+        "spatial_audio",
+        "night_mode",
     ]
 
-    def __init__(self, task, player):
+    def __init__(self, task, player, normalize=False, spatial_audio=False, night_mode=False):
         self.task = task
         self.player = player
+        self.normalize = normalize
+        self.spatial_audio = spatial_audio
+        self.night_mode = night_mode
 
     async def __call__(self):
         if sayAll.SayAllHandler.isRunning():
             self.task.text = self.task.text.replace("\n", " ")
             self.task.speech_options.sentence_silence_ms = 50
+
+        voice_key = self.task.speech_options.voice.key
+        rate = self.task.speech_options.rate
+        volume = self.task.speech_options.volume
+        pitch = self.task.speech_options.pitch
+
+        # --- Phrase cache check ---
+        cached = phrase_cache.get(self.task.text, voice_key, rate, volume, pitch)
+        if cached is not None:
+            feed_func = self.player.feed
+            for chunk in cached:
+                await run_in_executor(feed_func, chunk)
+            self.player.sync()
+            return
+
+        # --- Generate audio from gRPC ---
         speech_stream = await self.task.generate_audio()
         feed_func = self.player.feed
+        collected_chunks = []
+
+        # Compute pan once per utterance (position of focused object)
+        pan = _get_focus_pan() if self.spatial_audio else 0.0
+
         async for wave_samples in speech_stream:
-            await run_in_executor(feed_func, wave_samples)
+            chunk = wave_samples
+            # Post-processing pipeline
+            if self.night_mode:
+                chunk = await run_in_executor(apply_night_mode, chunk)
+            if self.normalize:
+                chunk = await run_in_executor(normalize_audio, chunk)
+            if self.spatial_audio:
+                chunk = await run_in_executor(mono_to_stereo_panned, chunk, pan)
+            collected_chunks.append(chunk)
+            await run_in_executor(feed_func, chunk)
+
         self.player.sync()
+
+        # Store in phrase cache (only if spatial audio is off — panned audio is
+        # position-specific and must not be replayed at a different position)
+        if not self.spatial_audio and collected_chunks:
+            phrase_cache.put(self.task.text, voice_key, rate, volume, pitch, collected_chunks)
 
 
 class BreakTask:
@@ -126,9 +198,9 @@ def SpeakerSetting():
         displayName=_("Speaker"),
     )
 
-def create_wave_player(sample_rate):
+def create_wave_player(sample_rate, channels=1):
     return WavePlayer(
-        channels=1,
+        channels=channels,
         samplesPerSec=sample_rate,
         bitsPerSample=16,
     )
@@ -166,6 +238,27 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         NumericDriverSetting("noise_scale", _("&Noise scale"), False),
         NumericDriverSetting("length_scale", _("&Length scale"), True),
         NumericDriverSetting("noise_w", _("Noise &w"), False),
+        # Feature 3: Volume normalisation
+        BooleanDriverSetting(
+            "normalize_audio",
+            # Translators: Label for normalize audio setting
+            _("&Normalize audio volume"),
+            defaultVal=False,
+        ),
+        # Feature 5: Spatial audio
+        BooleanDriverSetting(
+            "spatial_audio",
+            # Translators: Label for spatial audio setting
+            _("&Spatial audio (stereo panning)"),
+            defaultVal=False,
+        ),
+        # Feature 8: Structural speaker alternation
+        BooleanDriverSetting(
+            "structural_reading",
+            # Translators: Label for structural reading setting
+            _("Alternate &speaker for brackets and quotes"),
+            defaultVal=False,
+        ),
     )
     supportedCommands = {
         IndexCommand,
@@ -180,6 +273,9 @@ class SynthDriver(synthDriverHandler.SynthDriver):
     description = "Sonata Neural Voices"
     name = "sonata_neural_voices"
     cachePropertiesByDefault = False
+
+    # Feature 4: Night mode state
+    _night_mode = False
 
     @classmethod
     def check(cls):
@@ -253,6 +349,13 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         text_list = []
         index_command_list = []
         default_lang = self.tts.language
+
+        # Read feature flags once per utterance
+        do_normalize = self._get_normalize_audio()
+        do_spatial = self._get_spatial_audio()
+        do_structural = self._get_structural_reading()
+        do_night = self.__class__._night_mode
+
         for item in speechSequence:
             item_type = type(item)
             if item_type is IndexCommand:
@@ -262,11 +365,9 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 text_list.append(item)
                 continue
             if any(text_list):
-                speech_seq.append(
-                    SpeechTask(
-                        self.tts.create_speech_provider("\n".join(text_list)),
-                        self._player,
-                    )
+                self._append_speech_tasks(
+                    speech_seq, text_list,
+                    do_normalize, do_spatial, do_night, do_structural,
                 )
                 text_list.clear()
             if item_type is BreakCommand:
@@ -280,20 +381,24 @@ class SynthDriver(synthDriverHandler.SynthDriver):
                 if item.isDefault:
                     self.tts.language = default_lang
                 else:
-                    self.tts.language = item.lang
+                    # Feature 7: graceful fallback — keep current voice if lang not found
+                    try:
+                        self.tts.language = item.lang
+                    except Exception:
+                        pass  # silently continue with current voice language
             elif item_type is RateCommand:
                 self.tts.rate = item.newValue
             elif item_type is VolumeCommand:
                 self.tts.volume = item.newValue
             elif item_type is PitchCommand:
                 self.tts.pitch = item.newValue
+
         if any(text_list):
-            speech_seq.append(
-                SpeechTask(
-                    self.tts.create_speech_provider("\n".join(text_list)),
-                    self._player,
-                )
+            self._append_speech_tasks(
+                speech_seq, text_list,
+                do_normalize, do_spatial, do_night, do_structural,
             )
+
         if any(index_command_list):
             speech_seq.append(IndexReachedTask(self._on_index_reached, index_command_list))
         speech_seq.append(
@@ -304,6 +409,54 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         self._current_task = process_speech(
             speech_seq
         ).result()
+
+    def _append_speech_tasks(self, speech_seq, text_list, do_normalize, do_spatial, do_night, do_structural):
+        """Build SpeechTask(s) for the accumulated text, applying structural reading if enabled."""
+        joined_text = "\n".join(text_list)
+        voice = self.tts.speech_options.voice
+
+        if do_structural and voice.is_multi_speaker and len(voice.speaker_names) >= 2:
+            # Split text into main/aside segments and alternate speakers
+            segments = split_into_segments(joined_text)
+            default_speaker = voice.speaker
+            alt_speaker = voice.speaker_names[1] if voice.speaker_names[0] == default_speaker else voice.speaker_names[0]
+
+            for seg in segments:
+                # Switch speaker for aside segments
+                if seg.speaker_index is not None:
+                    try:
+                        voice.speaker = alt_speaker
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        voice.speaker = default_speaker
+                    except Exception:
+                        pass
+                speech_seq.append(
+                    SpeechTask(
+                        self.tts.create_speech_provider(seg.text),
+                        self._player,
+                        normalize=do_normalize,
+                        spatial_audio=do_spatial,
+                        night_mode=do_night,
+                    )
+                )
+            # Restore default speaker
+            try:
+                voice.speaker = default_speaker
+            except Exception:
+                pass
+        else:
+            speech_seq.append(
+                SpeechTask(
+                    self.tts.create_speech_provider(joined_text),
+                    self._player,
+                    normalize=do_normalize,
+                    spatial_audio=do_spatial,
+                    night_mode=do_night,
+                )
+            )
 
     def cancel(self):
         if self._current_task is not None:
@@ -320,10 +473,66 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             synthDoneSpeaking.notify(synth=self)
 
     def _get_or_create_player(self, sample_rate):
-        if sample_rate not in self._players:
-            self._players[sample_rate] = create_wave_player(sample_rate)
-        return self._players[sample_rate]
+        # When spatial audio is active we need stereo players
+        channels = 2 if self._get_spatial_audio() else 1
+        key = (sample_rate, channels)
+        if key not in self._players:
+            self._players[key] = create_wave_player(sample_rate, channels)
+        return self._players[key]
 
+    # ------------------------------------------------------------------ #
+    # Feature 3: Normalize audio                                           #
+    # ------------------------------------------------------------------ #
+    def _get_normalize_audio(self):
+        return getattr(self, "_normalize_audio_enabled", False)
+
+    def _set_normalize_audio(self, value):
+        self._normalize_audio_enabled = bool(value)
+
+    # ------------------------------------------------------------------ #
+    # Feature 5: Spatial audio                                             #
+    # ------------------------------------------------------------------ #
+    def _get_spatial_audio(self):
+        return getattr(self, "_spatial_audio_enabled", False)
+
+    def _set_spatial_audio(self, value):
+        enabled = bool(value)
+        self._spatial_audio_enabled = enabled
+        # Recreate player with correct channel count
+        voice = self.tts.speech_options.voice
+        self._player = self._get_or_create_player(voice.sample_rate)
+
+    # ------------------------------------------------------------------ #
+    # Feature 8: Structural reading                                        #
+    # ------------------------------------------------------------------ #
+    def _get_structural_reading(self):
+        return getattr(self, "_structural_reading_enabled", False)
+
+    def _set_structural_reading(self, value):
+        self._structural_reading_enabled = bool(value)
+
+    # ------------------------------------------------------------------ #
+    # Feature 4: Night mode script                                         #
+    # ------------------------------------------------------------------ #
+    def script_toggleNightMode(self, gesture):
+        self.__class__._night_mode = not self.__class__._night_mode
+        if self.__class__._night_mode:
+            # Translators: announced when night mode is turned on
+            tones.beep(300, 80)
+        else:
+            # Translators: announced when night mode is turned off
+            tones.beep(600, 80)
+
+    script_toggleNightMode.__doc__ = _(
+        # Translators: description of the toggle night mode script
+        "Toggles Sonata night mode (soft, quiet audio)"
+    )
+
+    __gestures = {}
+
+    # ------------------------------------------------------------------ #
+    # Rate / Volume / Pitch                                               #
+    # ------------------------------------------------------------------ #
     def _get_rateBoost(self):
         return self._rateBoost
 
@@ -435,6 +644,9 @@ class SynthDriver(synthDriverHandler.SynthDriver):
         if value not in self.availableVoices:
             value = list(self.availableVoices)[0]
         self.__voice = value
+        # Invalidate phrase cache for the old voice before switching
+        if hasattr(self, "tts"):
+            phrase_cache.invalidate_voice(self.tts.voice)
         with suppress(AttributeError):
             del self._availableVariants
         with suppress(AttributeError):
@@ -521,5 +733,4 @@ class SynthDriver(synthDriverHandler.SynthDriver):
             SonataConfig.setdefault(self.voice, {})["speaker"] = self.tts.speaker
 
     def _get_availableSpeakers(self):
-        return {spk: VoiceInfo(spk, spk, None) for spk in self.tts.get_speakers()}
-
+        return {spk: VoiceInfo(spk, spk, None) for spk in sorted(self.tts.get_speakers())}

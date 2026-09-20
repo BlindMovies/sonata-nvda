@@ -372,3 +372,103 @@ msgstr "ノイズ幅(&W)"
 #: buildVars.py:26
 msgid "Neural voices for NVDA based on Sonata"
 msgstr "SonataベースのNVDA向けニューラル音声"
+
+# Feature 3: Normalize audio
+msgid "&Normalize audio volume"
+msgstr "音量を自動ノーマライズする(&N)"
+
+# Feature 5: Spatial audio
+msgid "&Spatial audio (stereo panning)"
+msgstr "空間オーディオ（ステレオパンニング）(&S)"
+
+# Feature 8: Structural reading
+msgid "Alternate &speaker for brackets and quotes"
+msgstr "括弧や引用符の中身を別の話者で読む(&S)"
+
+# Feature 4: Night mode script
+msgid "Toggles Sonata night mode (soft, quiet audio)"
+msgstr "Sonataのナイトモード（ソフトで静かな音声）を切り替えます"
+
+# Feature 6: App profiles menu
+msgid "Sonata app &profiles..."
+msgstr "Sonataアプリプロファイル(&P)..."
+
+msgid "Configure per-application Sonata voice profiles"
+msgstr "アプリケーションごとのSonata音声プロファイルを設定します"
+
+# Profile dialog strings
+msgid "Edit App Profile"
+msgstr "アプリプロファイルを編集"
+
+msgid "Application name (e.g. firefox):"
+msgstr "アプリケーション名（例: firefox）:"
+
+msgid "Voice:"
+msgstr "音声:"
+
+msgid "Rate (0-100, blank=default):"
+msgstr "速度（0〜100、空白=デフォルト）:"
+
+msgid "Volume (0-100, blank=default):"
+msgstr "音量（0〜100、空白=デフォルト）:"
+
+msgid "Pitch (0-100, blank=default):"
+msgstr "ピッチ（0〜100、空白=デフォルト）:"
+
+msgid "Please enter an application name."
+msgstr "アプリケーション名を入力してください。"
+
+msgid "Sonata App Profiles"
+msgstr "Sonata アプリプロファイル"
+
+msgid "Configure per-application voice settings.\nSonata will automatically switch to the saved profile\nwhen the specified application gains focus."
+msgstr "アプリケーションごとの音声設定を行います。\n指定したアプリケーションにフォーカスが移ると、\nSonataが自動的に保存されたプロファイルに切り替えます。"
+
+msgid "Application"
+msgstr "アプリケーション"
+
+msgid "&Add..."
+msgstr "追加(&A)..."
+
+msgid "&Edit..."
+msgstr "編集(&E)..."
+
+msgid "&Delete"
+msgstr "削除(&D)"
+
+msgid "Delete profile for '{app}'?"
+msgstr "'{app}' のプロファイルを削除しますか？"
+
+msgid "Confirm"
+msgstr "確認"
+
+# URL install panel strings
+msgid "Paste a direct download URL for a Piper voice archive (.tar.gz).\nSupported: HuggingFace resolve links, direct HTTPS links."
+msgstr "Piper音声アーカイブ（.tar.gz）の直接ダウンロードURLを貼り付けてください。\n対応: HuggingFaceのresolveリンク、直接HTTPSリンク。"
+
+msgid "&Install from URL"
+msgstr "URLからインストール(&I)"
+
+msgid "Please enter a URL."
+msgstr "URLを入力してください。"
+
+msgid "Please enter a valid http or https URL."
+msgstr "有効なhttp/httpsのURLを入力してください。"
+
+msgid "Downloading…"
+msgstr "ダウンロード中…"
+
+msgid "Downloading… {pct}%"
+msgstr "ダウンロード中… {pct}%"
+
+msgid "Installing…"
+msgstr "インストール中…"
+
+msgid "Voice installed successfully from URL."
+msgstr "URLから音声を正常にインストールしました。"
+
+msgid "Failed to install voice.\n{error}"
+msgstr "音声のインストールに失敗しました。\n{error}"
+
+msgid "Install from URL"
+msgstr "URLからインストール"
